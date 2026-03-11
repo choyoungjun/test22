@@ -41,6 +41,12 @@ public:
 	FString DocumentId;
 
 	UPROPERTY(EditAnywhere, Config, Category = "Google Sheet")
+	bool bAutoDiscoverSheets = true;
+
+	UPROPERTY(EditAnywhere, Config, Category = "Google Sheet")
+	bool bAutoSyncBeforeImport = true;
+
+	UPROPERTY(EditAnywhere, Config, Category = "Google Sheet")
 	TArray<FGoogleSheetDefinition> Sheets;
 
 	UPROPERTY(EditAnywhere, Config, Category = "Output")

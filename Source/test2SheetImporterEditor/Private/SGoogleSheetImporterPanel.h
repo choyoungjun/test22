@@ -4,6 +4,7 @@
 #include "Widgets/SCompoundWidget.h"
 
 class SMultiLineEditableTextBox;
+class SVerticalBox;
 
 class SGoogleSheetImporterPanel : public SCompoundWidget
 {
@@ -14,6 +15,7 @@ public:
 	void Construct(const FArguments& InArgs);
 
 private:
+	FReply OnSyncSheetsClicked();
 	FReply OnValidateClicked();
 	FReply OnGenerateCodeOnlyClicked();
 	FReply OnCreateAssetsClicked();
@@ -21,10 +23,12 @@ private:
 	FReply OnRegenerateProjectFilesClicked();
 	FReply OnBuildEditorClicked();
 
+	void RefreshSheetList();
 	void AppendLogLine(const FString& Message);
 	void AppendImportResult(const struct FGoogleSheetImportResult& Result);
 
 private:
+	TSharedPtr<SVerticalBox> SheetListBox;
 	TSharedPtr<SMultiLineEditableTextBox> LogTextBox;
 	FString LogBuffer;
 };

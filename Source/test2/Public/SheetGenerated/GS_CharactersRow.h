@@ -4,10 +4,10 @@
 #include "CoreMinimal.h"
 #include "Engine/DataTable.h"
 #include "SheetGenerated/GS_Enums.h"
-#include "GS_MonstersRow.generated.h"
+#include "GS_CharactersRow.generated.h"
 
 USTRUCT(BlueprintType)
-struct FMonstersRow : public FTableRowBase
+struct FCharactersRow : public FTableRowBase
 {
 	GENERATED_BODY()
 
@@ -19,8 +19,5 @@ struct FMonstersRow : public FTableRowBase
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	int32 value;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	int32 value2;
 
 };
