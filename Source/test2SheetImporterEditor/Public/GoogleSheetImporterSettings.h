@@ -23,6 +23,9 @@ struct FGoogleSheetDefinition
 	FString Gid;
 
 	UPROPERTY(EditAnywhere, Config, Category = "Google Sheet")
+	FString SourceDocumentId;
+
+	UPROPERTY(EditAnywhere, Config, Category = "Google Sheet")
 	EGoogleSheetDefinitionType DefinitionType = EGoogleSheetDefinitionType::Table;
 
 	UPROPERTY(EditAnywhere, Config, Category = "Output")
@@ -38,7 +41,7 @@ public:
 	virtual FName GetCategoryName() const override { return TEXT("Plugins"); }
 
 	UPROPERTY(EditAnywhere, Config, Category = "Google Sheet")
-	FString DocumentId;
+	TArray<FString> DocumentIds;
 
 	UPROPERTY(EditAnywhere, Config, Category = "Google Sheet")
 	bool bAutoDiscoverSheets = true;

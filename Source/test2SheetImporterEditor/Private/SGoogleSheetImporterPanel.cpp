@@ -173,14 +173,28 @@ void SGoogleSheetImporterPanel::RefreshSheetList()
 
 	if (Settings != nullptr)
 	{
+		int32 DocumentCount = 0;
+		for (const FString& Item : Settings->DocumentIds)
+		{
+			if (!Item.TrimStartAndEnd().IsEmpty())
+			{
+				DocumentCount++;
+			}
+		}
+		// if (DocumentCount == 0 && !Settings->DocumentId.TrimStartAndEnd().IsEmpty())
+		// {
+		// 	DocumentCount = 1;
+		// }
+
 		SheetListBox->AddSlot()
 		.AutoHeight()
 		.Padding(2.0f)
 		[
 			SNew(STextBlock)
 			.Text(FText::FromString(FString::Printf(
-				TEXT("DocumentId: %s | Sheets: %d"),
-				*Settings->DocumentId,
+				TEXT("Documents: %d | Legacy DocumentId: %s | Sheets: %d"),
+				DocumentCount,
+				*Settings->DocumentIds[0],
 				Sheets.Num())))
 		];
 	}
@@ -204,6 +218,7 @@ void SGoogleSheetImporterPanel::RefreshSheetList()
 			? FLinearColor(0.05f, 0.30f, 0.05f, 0.65f)
 			: FLinearColor(0.08f, 0.08f, 0.08f, 0.65f);
 		const FString TypeLabel = bIsTable ? TEXT("Table") : TEXT("Enum");
+		const FString SourceDocumentId = Sheet.SourceDocumentId.TrimStartAndEnd().IsEmpty() ? TEXT("(default)") : Sheet.SourceDocumentId;
 
 		SheetListBox->AddSlot()
 		.AutoHeight()
@@ -220,8 +235,9 @@ void SGoogleSheetImporterPanel::RefreshSheetList()
 				[
 					SNew(STextBlock)
 					.Text(FText::FromString(FString::Printf(
-						TEXT("Type: %s  |  Gid: %s  |  Output: %s"),
+						TEXT("Type: %s  |  DocumentId: %s  |  Gid: %s  |  Output: %s"),
 						*TypeLabel,
+						*SourceDocumentId,
 						*Sheet.Gid,
 						*Sheet.AssetOutputPath)))
 				]

@@ -20,4 +20,10 @@ struct FCharactersRow : public FTableRowBase
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	int32 value;
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	EEnumsCharacter type;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	int32 Price;
+
 };

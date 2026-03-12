@@ -150,6 +150,64 @@ namespace GoogleSheetImporter
 		return Result;
 	}
 
+	static void AddDocumentIdIfValid(const FString& Candidate, TArray<FString>& OutDocumentIds, TSet<FString>& Seen)
+	{
+		const FString Trimmed = Candidate.TrimStartAndEnd();
+		if (Trimmed.IsEmpty() || Seen.Contains(Trimmed))
+		{
+			return;
+		}
+
+		Seen.Add(Trimmed);
+		OutDocumentIds.Add(Trimmed);
+	}
+
+	static TArray<FString> GetConfiguredDocumentIds(const UGoogleSheetImporterSettings* Settings)
+	{
+		TArray<FString> DocumentIds;
+		TSet<FString> Seen;
+		if (Settings == nullptr)
+		{
+			return DocumentIds;
+		}
+
+		for (const FString& Item : Settings->DocumentIds)
+		{
+			AddDocumentIdIfValid(Item, DocumentIds, Seen);
+		}
+
+		if (DocumentIds.Num() == 0)
+		{
+			return DocumentIds;
+			// FString Legacy = Settings->DocumentId;
+			// Legacy.ReplaceInline(TEXT(","), TEXT("\n"));
+			// Legacy.ReplaceInline(TEXT(";"), TEXT("\n"));
+			// Legacy.ReplaceInline(TEXT("\t"), TEXT("\n"));
+
+			// TArray<FString> Tokens;
+			// Legacy.ParseIntoArrayLines(Tokens, true);
+			
+			// for (const FString& Token : Tokens)
+			// {
+			// 	AddDocumentIdIfValid(Token, DocumentIds, Seen);
+			// }
+
+			// AddDocumentIdIfValid(Settings->DocumentId, DocumentIds, Seen);
+		}
+
+		return DocumentIds;
+	}
+
+	static FString ResolveSheetDocumentId(const FGoogleSheetDefinition& Definition, const FString& DefaultDocumentId)
+	{
+		const FString FromSheet = Definition.SourceDocumentId.TrimStartAndEnd();
+		if (!FromSheet.IsEmpty())
+		{
+			return FromSheet;
+		}
+		return DefaultDocumentId.TrimStartAndEnd();
+	}
+
 	static bool ParseCsv(const FString &CsvContent, TArray<TArray<FString>> &OutRows)
 	{
 		OutRows.Reset();
@@ -991,71 +1049,92 @@ bool FGoogleSheetImporterService::SyncSheetsFromDocument(FGoogleSheetImportResul
 		return false;
 	}
 
-	const FString DocumentId = Settings->DocumentId.TrimStartAndEnd();
-	if (DocumentId.IsEmpty())
+	const TArray<FString> DocumentIds = GetConfiguredDocumentIds(Settings);
+	if (DocumentIds.Num() == 0)
 	{
 		OutResult.bSuccess = false;
 		OutResult.ErrorCount++;
-		OutResult.Messages.Add(TEXT("DocumentId is empty."));
+		OutResult.Messages.Add(TEXT("No DocumentId configured."));
 		return false;
 	}
 
-	const FString FeedUrl = MakePublicWorksheetFeedUrl(DocumentId);
-	FString FeedText;
-	FString RequestError;
-	TArray<FGoogleSheetDefinition> Discovered;
-	FString ParseError;
-	const bool bFeedLoaded = FetchTextSync(FeedUrl, FeedText, RequestError);
-	const bool bFeedParsed = bFeedLoaded && ParseWorksheetFeed(FeedText, Discovered, ParseError);
-	if (!bFeedParsed)
+	TArray<FGoogleSheetDefinition> DiscoveredAll;
+	for (const FString& DocumentId : DocumentIds)
 	{
-		if (!bFeedLoaded)
+		const FString FeedUrl = MakePublicWorksheetFeedUrl(DocumentId);
+		FString FeedText;
+		FString RequestError;
+		TArray<FGoogleSheetDefinition> Discovered;
+		FString ParseError;
+		const bool bFeedLoaded = FetchTextSync(FeedUrl, FeedText, RequestError);
+		const bool bFeedParsed = bFeedLoaded && ParseWorksheetFeed(FeedText, Discovered, ParseError);
+		if (!bFeedParsed)
 		{
-			OutResult.Messages.Add(FString::Printf(TEXT("Worksheet feed unavailable: %s (%s)"), *RequestError, *FeedUrl));
-		}
-		else
-		{
-			OutResult.Messages.Add(FString::Printf(TEXT("Worksheet feed parse failed: %s"), *ParseError));
+			if (!bFeedLoaded)
+			{
+				OutResult.Messages.Add(FString::Printf(TEXT("[%s] Worksheet feed unavailable: %s (%s)"), *DocumentId, *RequestError, *FeedUrl));
+			}
+			else
+			{
+				OutResult.Messages.Add(FString::Printf(TEXT("[%s] Worksheet feed parse failed: %s"), *DocumentId, *ParseError));
+			}
+
+			const FString HtmlUrl = MakeSpreadsheetEditUrl(DocumentId);
+			FString HtmlText;
+			FString HtmlError;
+			if (!FetchTextSync(HtmlUrl, HtmlText, HtmlError))
+			{
+				OutResult.bSuccess = false;
+				OutResult.ErrorCount++;
+				OutResult.Messages.Add(FString::Printf(TEXT("[%s] Fallback HTML load failed: %s (%s)"), *DocumentId, *HtmlError, *HtmlUrl));
+				OutResult.Messages.Add(TEXT("If this spreadsheet is private, publish it to web or configure sheets manually."));
+				continue;
+			}
+
+			if (!ParseSheetDefinitionsFromEditHtml(HtmlText, Discovered, ParseError))
+			{
+				OutResult.bSuccess = false;
+				OutResult.ErrorCount++;
+				OutResult.Messages.Add(FString::Printf(TEXT("[%s] Fallback HTML parse failed: %s"), *DocumentId, *ParseError));
+				OutResult.Messages.Add(TEXT("Use manual sheet configuration if auto-discovery is unavailable."));
+				continue;
+			}
+
+			OutResult.Messages.Add(FString::Printf(TEXT("[%s] Discovered sheets using HTML fallback."), *DocumentId));
 		}
 
-		const FString HtmlUrl = MakeSpreadsheetEditUrl(DocumentId);
-		FString HtmlText;
-		FString HtmlError;
-		if (!FetchTextSync(HtmlUrl, HtmlText, HtmlError))
+		for (FGoogleSheetDefinition& Found : Discovered)
 		{
-			OutResult.bSuccess = false;
-			OutResult.ErrorCount++;
-			OutResult.Messages.Add(FString::Printf(TEXT("Fallback HTML load failed: %s (%s)"), *HtmlError, *HtmlUrl));
-			OutResult.Messages.Add(TEXT("If this spreadsheet is private, publish it to web or configure sheets manually."));
-			return false;
+			Found.SourceDocumentId = DocumentId;
+			DiscoveredAll.Add(Found);
 		}
-
-		if (!ParseSheetDefinitionsFromEditHtml(HtmlText, Discovered, ParseError))
-		{
-			OutResult.bSuccess = false;
-			OutResult.ErrorCount++;
-			OutResult.Messages.Add(FString::Printf(TEXT("Fallback HTML parse failed: %s"), *ParseError));
-			OutResult.Messages.Add(TEXT("Use manual sheet configuration if auto-discovery is unavailable."));
-			return false;
-		}
-
-		OutResult.Messages.Add(TEXT("Discovered sheets using HTML fallback."));
+	}
+	if (DiscoveredAll.Num() == 0)
+	{
+		OutResult.bSuccess = false;
+		OutResult.ErrorCount++;
+		OutResult.Messages.Add(TEXT("No sheets discovered from configured documents."));
+		return false;
 	}
 
+	const FString DefaultDocumentId = DocumentIds[0];
+
 	TArray<FGoogleSheetDefinition> Merged;
-	Merged.Reserve(Discovered.Num());
-	for (const FGoogleSheetDefinition& Found : Discovered)
+	Merged.Reserve(DiscoveredAll.Num());
+	for (const FGoogleSheetDefinition& Found : DiscoveredAll)
 	{
 		FGoogleSheetDefinition Definition = Found;
-		const FGoogleSheetDefinition* Existing = Settings->Sheets.FindByPredicate([&Found](const FGoogleSheetDefinition& Item)
+		const FGoogleSheetDefinition* Existing = Settings->Sheets.FindByPredicate([&Found, &DefaultDocumentId](const FGoogleSheetDefinition& Item)
 		{
-			return Item.Gid == Found.Gid;
+			return Item.Gid == Found.Gid &&
+				ResolveSheetDocumentId(Item, DefaultDocumentId).Equals(ResolveSheetDocumentId(Found, DefaultDocumentId), ESearchCase::CaseSensitive);
 		});
 		if (Existing == nullptr)
 		{
-			Existing = Settings->Sheets.FindByPredicate([&Found](const FGoogleSheetDefinition& Item)
+			Existing = Settings->Sheets.FindByPredicate([&Found, &DefaultDocumentId](const FGoogleSheetDefinition& Item)
 			{
-				return Item.SheetName.Equals(Found.SheetName, ESearchCase::IgnoreCase);
+				return Item.SheetName.Equals(Found.SheetName, ESearchCase::IgnoreCase) &&
+					ResolveSheetDocumentId(Item, DefaultDocumentId).Equals(ResolveSheetDocumentId(Found, DefaultDocumentId), ESearchCase::CaseSensitive);
 			});
 		}
 
@@ -1074,14 +1153,15 @@ bool FGoogleSheetImporterService::SyncSheetsFromDocument(FGoogleSheetImportResul
 
 	Merged.Sort([](const FGoogleSheetDefinition& A, const FGoogleSheetDefinition& B)
 	{
-		return A.SheetName < B.SheetName;
+		const int32 DocCompare = A.SourceDocumentId.Compare(B.SourceDocumentId, ESearchCase::CaseSensitive);
+		return DocCompare == 0 ? (A.SheetName < B.SheetName) : (DocCompare < 0);
 	});
 
 	Settings->Sheets = Merged;
 	Settings->SaveConfig();
 
 	OutResult.SuccessCount += Merged.Num();
-	OutResult.Messages.Add(FString::Printf(TEXT("Synchronized %d sheets from document."), Merged.Num()));
+	OutResult.Messages.Add(FString::Printf(TEXT("Synchronized %d sheets from %d document(s)."), Merged.Num(), DocumentIds.Num()));
 	return true;
 }
 
@@ -1124,13 +1204,15 @@ FGoogleSheetImportResult FGoogleSheetImporterService::Execute(const EGoogleSheet
 		Settings = GetDefault<UGoogleSheetImporterSettings>();
 	}
 
-	if (Settings->DocumentId.TrimStartAndEnd().IsEmpty())
+	const TArray<FString> DocumentIds = GetConfiguredDocumentIds(Settings);
+	if (DocumentIds.Num() == 0)
 	{
 		Result.bSuccess = false;
 		Result.ErrorCount++;
-		Result.Messages.Add(TEXT("DocumentId is empty in Project Settings > Plugins > Google Sheet Importer."));
+		Result.Messages.Add(TEXT("No DocumentId configured in Project Settings > Plugins > Google Sheet Importer."));
 		return Result;
 	}
+	const FString DefaultDocumentId = DocumentIds[0];
 
 	if (Settings->Sheets.Num() == 0)
 	{
@@ -1157,14 +1239,23 @@ FGoogleSheetImportResult FGoogleSheetImporterService::Execute(const EGoogleSheet
 				continue;
 			}
 
-			const FString Url = MakeSheetUrl(Settings->DocumentId.TrimStartAndEnd(), Definition.Gid.TrimStartAndEnd());
+			const FString SheetDocumentId = ResolveSheetDocumentId(Definition, DefaultDocumentId);
+			if (SheetDocumentId.IsEmpty())
+			{
+				Result.bSuccess = false;
+				Result.ErrorCount++;
+				Result.Messages.Add(FString::Printf(TEXT("[%s] Missing SourceDocumentId and no default DocumentId is available."), *Definition.SheetName));
+				continue;
+			}
+
+			const FString Url = MakeSheetUrl(SheetDocumentId, Definition.Gid.TrimStartAndEnd());
 			FString CsvContent;
 			FString Error;
 			if (!FetchCsvSync(Url, CsvContent, Error))
 			{
 				Result.bSuccess = false;
 				Result.ErrorCount++;
-				Result.Messages.Add(FString::Printf(TEXT("[%s] Download failed: %s (%s)"), *Definition.SheetName, *Error, *Url));
+				Result.Messages.Add(FString::Printf(TEXT("[%s] Download failed: %s (%s) [DocumentId=%s]"), *Definition.SheetName, *Error, *Url, *SheetDocumentId));
 				continue;
 			}
 
