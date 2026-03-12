@@ -21,7 +21,7 @@ struct FCharactersRow : public FTableRowBase
 	int32 value;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	EEnumsCharacter type;
+	EEnumCharacter type;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	int32 Price;

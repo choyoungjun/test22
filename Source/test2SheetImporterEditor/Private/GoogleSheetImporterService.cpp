@@ -983,13 +983,25 @@ namespace GoogleSheetImporter
 
 		const FString DataTableName = TEXT("DT_") + ToPascalCaseIdentifier(TableSheet.SheetName);
 		const FString PackageName = AssetPath / DataTableName;
-		UPackage *Package = CreatePackage(*PackageName);
+		UPackage *Package = FindPackage(nullptr, *PackageName);
+		if (Package == nullptr)
+		{
+			Package = LoadPackage(nullptr, *PackageName, LOAD_None);
+		}
+		if (Package == nullptr)
+		{
+			Package = CreatePackage(*PackageName);
+		}
 		if (Package == nullptr)
 		{
 			OutResult.bSuccess = false;
 			OutResult.ErrorCount++;
 			OutResult.Messages.Add(FString::Printf(TEXT("[%s] Failed creating package: %s"), *TableSheet.SheetName, *PackageName));
 			return false;
+		}
+		if (!Package->IsFullyLoaded())
+		{
+			Package->FullyLoad();
 		}
 
 		UDataTable *DataTable = FindObject<UDataTable>(Package, *DataTableName);
