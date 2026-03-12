@@ -32,7 +32,7 @@ struct FGoogleSheetDefinition
 	FString AssetOutputPath = TEXT("/Game/Data/Generated");
 };
 
-UCLASS(Config = EditorPerProjectUserSettings, DefaultConfig, meta = (DisplayName = "Google Sheet Importer"))
+UCLASS(Config = Editor, DefaultConfig, meta = (DisplayName = "Google Sheet Importer"))
 class TEST2SHEETIMPORTEREDITOR_API UGoogleSheetImporterSettings : public UDeveloperSettings
 {
 	GENERATED_BODY()
