@@ -7,10 +7,10 @@
 UENUM(BlueprintType)
 enum class EEnumCharacter : uint8
 {
-	Boss = 3,
-	Monster = 1,
-	None = 0,
-	NPC = 2
+	Boss = 3 UMETA(DisplayName="Boss"),
+	Monster = 1 UMETA(DisplayName="Monster"),
+	None = 0 UMETA(DisplayName="None"),
+	NPC = 2 UMETA(DisplayName="NPC")
 };
 
 UENUM(BlueprintType)

@@ -4,6 +4,7 @@
 #include "CoreMinimal.h"
 #include "Engine/DataTable.h"
 #include "SheetGenerated/GS_Enums.h"
+#include "GS_CommonTableRow.h"
 #include "GS_MonstersRow.generated.h"
 
 USTRUCT(BlueprintType)
@@ -12,10 +13,7 @@ struct FMonstersRow : public FTableRowBase
 	GENERATED_BODY()
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	FName id;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	FText name;
+	FCommonTableRow CommonTable;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	int32 value;

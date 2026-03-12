@@ -16,6 +16,8 @@
 #include "Dom/JsonObject.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
+#include "Engine/UserDefinedEnum.h"
+#include "Kismet2/EnumEditorUtils.h"
 #include "UObject/ObjectMacros.h"
 #include "UObject/Package.h"
 #include "UObject/UObjectGlobals.h"
@@ -36,6 +38,9 @@ namespace GoogleSheetImporter
 	{
 		FString SheetName;
 		FString EnumName;
+		FString AssetName;
+		FString AssetOutputPath;
+		bool bCreateAsUserDefinedAsset = false;
 		TArray<FParsedEnumEntry> Entries;
 	};
 
@@ -43,6 +48,12 @@ namespace GoogleSheetImporter
 	{
 		FString Name;
 		FString Type;
+		FString SourceHeader;
+		bool bIsNestedField = false;
+		FString NestedMemberName;
+		FString NestedFieldName;
+		FString NestedStructType;
+		FString NestedStructSheetName;
 	};
 
 	struct FParsedTableSheet
@@ -58,8 +69,17 @@ namespace GoogleSheetImporter
 
 	struct FParsedWorkbook
 	{
-		TArray<FParsedEnumSheet> Enums;
+		TArray<FParsedEnumSheet> NativeEnums;
+		TArray<FParsedEnumSheet> UserDefinedEnums;
 		TArray<FParsedTableSheet> Tables;
+	};
+
+	struct FNestedColumnCandidate
+	{
+		int32 ColumnIndex = INDEX_NONE;
+		FString MemberName;
+		FString FieldName;
+		bool bExplicitDotNotation = false;
 	};
 
 	static FString MakeSheetUrl(const FString &DocumentId, const FString &Gid)
@@ -80,11 +100,41 @@ namespace GoogleSheetImporter
 	static EGoogleSheetDefinitionType GuessDefinitionType(const FString& SheetName)
 	{
 		const FString Lower = SheetName.ToLower();
-		if (Lower.StartsWith(TEXT("enum")) || Lower.StartsWith(TEXT("enums")))
+		if (Lower.StartsWith(TEXT("enum")) || Lower.StartsWith(TEXT("enums")) || Lower.StartsWith(TEXT("uenum")))
 		{
 			return EGoogleSheetDefinitionType::Enum;
 		}
 		return EGoogleSheetDefinitionType::Table;
+	}
+
+	static bool IsUserDefinedEnumSheetName(const FString& SheetName)
+	{
+		return SheetName.TrimStartAndEnd().ToLower().StartsWith(TEXT("uenum"));
+	}
+
+	static FString GetEnumSheetBaseName(const FString& SheetName)
+	{
+		FString Name = SheetName.TrimStartAndEnd();
+		FString Lower = Name.ToLower();
+		if (Lower.StartsWith(TEXT("uenum")))
+		{
+			int32 StartIndex = 5; // "uenum"
+			if (Name.Len() > StartIndex && Name[StartIndex] == TEXT('_'))
+			{
+				StartIndex++;
+			}
+			return Name.Mid(StartIndex);
+		}
+		if (Lower.StartsWith(TEXT("enum")))
+		{
+			int32 StartIndex = 4; // "enum"
+			if (Name.Len() > StartIndex && Name[StartIndex] == TEXT('_'))
+			{
+				StartIndex++;
+			}
+			return Name.Mid(StartIndex);
+		}
+		return Name;
 	}
 
 	static FString ToSafeIdentifier(const FString &Input)
@@ -605,7 +655,24 @@ namespace GoogleSheetImporter
 		}
 
 		OutSheet.SheetName = Definition.SheetName;
-		OutSheet.EnumName = TEXT("E") + ToPascalCaseIdentifier(Definition.SheetName);
+		OutSheet.bCreateAsUserDefinedAsset = IsUserDefinedEnumSheetName(Definition.SheetName);
+		const FString EnumBaseName = GetEnumSheetBaseName(Definition.SheetName);
+		const FString PascalEnumBaseName = ToPascalCaseIdentifier(EnumBaseName);
+		if (OutSheet.bCreateAsUserDefinedAsset)
+		{
+			OutSheet.EnumName = TEXT("E") + PascalEnumBaseName;
+		}
+		else
+		{
+			// Keep legacy native-enum naming (eg. Enum_Character -> EEnumCharacter).
+			OutSheet.EnumName = TEXT("E") + ToPascalCaseIdentifier(Definition.SheetName);
+		}
+		OutSheet.AssetName = TEXT("Enum") + PascalEnumBaseName;
+		OutSheet.AssetOutputPath = Definition.AssetOutputPath;
+		if (OutSheet.AssetOutputPath.IsEmpty())
+		{
+			OutSheet.AssetOutputPath = GetDefault<UGoogleSheetImporterSettings>()->DefaultDataAssetOutputPath;
+		}
 
 		int32 NextAutoValue = 0;
 		TSet<FString> EntryNames;
@@ -773,6 +840,7 @@ namespace GoogleSheetImporter
 			FParsedTableColumn Column;
 			Column.Name = Header;
 			Column.Type = Type;
+			Column.SourceHeader = HeaderRow[Col].TrimStartAndEnd();
 			OutSheet.Columns.Add(Column);
 		}
 
@@ -831,6 +899,161 @@ namespace GoogleSheetImporter
 		return OutSheet.Rows.Num() > 0;
 	}
 
+	static bool TryExtractNestedParts(const FParsedTableColumn& Column, FString& OutMember, FString& OutField, bool& bOutExplicitDotNotation)
+	{
+		OutMember.Empty();
+		OutField.Empty();
+		bOutExplicitDotNotation = false;
+
+		const FString TrimmedSourceHeader = Column.SourceHeader.TrimStartAndEnd();
+		const int32 DotIndex = TrimmedSourceHeader.Find(TEXT("."));
+		if (DotIndex != INDEX_NONE && DotIndex > 0 && DotIndex + 1 < TrimmedSourceHeader.Len())
+		{
+			const FString RawMember = TrimmedSourceHeader.Left(DotIndex);
+			const FString RawField = TrimmedSourceHeader.Mid(DotIndex + 1);
+			const FString Member = ToSafeIdentifier(RawMember);
+			const FString Field = ToSafeIdentifier(RawField);
+			if (!Member.IsEmpty() && !Field.IsEmpty())
+			{
+				OutMember = Member;
+				OutField = Field;
+				bOutExplicitDotNotation = true;
+				return true;
+			}
+		}
+
+		const int32 UnderscoreIndex = Column.Name.Find(TEXT("_"));
+		if (UnderscoreIndex != INDEX_NONE && UnderscoreIndex > 0 && UnderscoreIndex + 1 < Column.Name.Len())
+		{
+			OutMember = ToSafeIdentifier(Column.Name.Left(UnderscoreIndex));
+			OutField = ToSafeIdentifier(Column.Name.Mid(UnderscoreIndex + 1));
+			return !OutMember.IsEmpty() && !OutField.IsEmpty();
+		}
+
+		return false;
+	}
+
+	static const FParsedTableColumn* FindColumnByName(const FParsedTableSheet& Table, const FString& ColumnName)
+	{
+		for (int32 Col = 0; Col < Table.Columns.Num(); ++Col)
+		{
+			if (Col == Table.RowNameColumnIndex)
+			{
+				continue;
+			}
+
+			if (Table.Columns[Col].Name.Equals(ColumnName, ESearchCase::IgnoreCase))
+			{
+				return &Table.Columns[Col];
+			}
+		}
+
+		return nullptr;
+	}
+
+	static void ApplyBaseTableComposition(FParsedWorkbook& Workbook, FGoogleSheetImportResult& OutResult)
+	{
+		TMap<FString, int32> TableIndexBySafeSheetName;
+		for (int32 TableIndex = 0; TableIndex < Workbook.Tables.Num(); ++TableIndex)
+		{
+			const FString SafeSheetName = ToSafeIdentifier(Workbook.Tables[TableIndex].SheetName).ToLower();
+			if (!SafeSheetName.IsEmpty() && !TableIndexBySafeSheetName.Contains(SafeSheetName))
+			{
+				TableIndexBySafeSheetName.Add(SafeSheetName, TableIndex);
+			}
+		}
+
+		for (int32 TableIndex = 0; TableIndex < Workbook.Tables.Num(); ++TableIndex)
+		{
+			FParsedTableSheet& Table = Workbook.Tables[TableIndex];
+			TMap<FString, TArray<FNestedColumnCandidate>> GroupedCandidates;
+
+			for (int32 Col = 0; Col < Table.Columns.Num(); ++Col)
+			{
+				if (Col == Table.RowNameColumnIndex)
+				{
+					continue;
+				}
+
+				FString MemberName;
+				FString FieldName;
+				bool bExplicitDotNotation = false;
+				if (!TryExtractNestedParts(Table.Columns[Col], MemberName, FieldName, bExplicitDotNotation))
+				{
+					continue;
+				}
+
+				FNestedColumnCandidate Candidate;
+				Candidate.ColumnIndex = Col;
+				Candidate.MemberName = MemberName;
+				Candidate.FieldName = FieldName;
+				Candidate.bExplicitDotNotation = bExplicitDotNotation;
+				GroupedCandidates.FindOrAdd(MemberName).Add(Candidate);
+			}
+
+			for (const TPair<FString, TArray<FNestedColumnCandidate>>& Pair : GroupedCandidates)
+			{
+				const FString& MemberName = Pair.Key;
+				const TArray<FNestedColumnCandidate>& Candidates = Pair.Value;
+
+				const bool bAnyDotNotation = Candidates.ContainsByPredicate([](const FNestedColumnCandidate& Candidate)
+				{
+					return Candidate.bExplicitDotNotation;
+				});
+				if (!bAnyDotNotation && Candidates.Num() < 2)
+				{
+					continue;
+				}
+
+				const int32* BaseTableIndexPtr = TableIndexBySafeSheetName.Find(MemberName.ToLower());
+				if (BaseTableIndexPtr == nullptr || *BaseTableIndexPtr == TableIndex)
+				{
+					continue;
+				}
+
+				const FParsedTableSheet& BaseTable = Workbook.Tables[*BaseTableIndexPtr];
+				bool bAllMatch = true;
+				for (const FNestedColumnCandidate& Candidate : Candidates)
+				{
+					const FParsedTableColumn* MatchingBaseColumn = FindColumnByName(BaseTable, Candidate.FieldName);
+					if (MatchingBaseColumn == nullptr)
+					{
+						bAllMatch = false;
+						break;
+					}
+
+					const FParsedTableColumn& SourceColumn = Table.Columns[Candidate.ColumnIndex];
+					if (!SourceColumn.Type.Equals(MatchingBaseColumn->Type, ESearchCase::CaseSensitive))
+					{
+						bAllMatch = false;
+						break;
+					}
+				}
+
+				if (!bAllMatch)
+				{
+					continue;
+				}
+
+				for (const FNestedColumnCandidate& Candidate : Candidates)
+				{
+					FParsedTableColumn& SourceColumn = Table.Columns[Candidate.ColumnIndex];
+					SourceColumn.bIsNestedField = true;
+					SourceColumn.NestedMemberName = MemberName;
+					SourceColumn.NestedFieldName = Candidate.FieldName;
+					SourceColumn.NestedStructType = BaseTable.StructName;
+					SourceColumn.NestedStructSheetName = BaseTable.SheetName;
+				}
+
+				OutResult.Messages.Add(FString::Printf(
+					TEXT("[%s] Applied BaseTable composition: %s -> %s"),
+					*Table.SheetName,
+					*MemberName,
+					*BaseTable.StructName));
+			}
+		}
+	}
+
 	static FString BuildEnumsHeader(const TArray<FParsedEnumSheet> &EnumSheets)
 	{
 		FString Out;
@@ -882,6 +1105,32 @@ namespace GoogleSheetImporter
 		Out += TEXT("#include \"CoreMinimal.h\"\n");
 		Out += TEXT("#include \"Engine/DataTable.h\"\n");
 		Out += TEXT("#include \"SheetGenerated/GS_Enums.h\"\n");
+		TArray<FString> NestedIncludes;
+		TSet<FString> NestedIncludeSet;
+		for (const FParsedTableColumn& Column : TableSheet.Columns)
+		{
+			if (!Column.bIsNestedField || Column.NestedStructSheetName.IsEmpty())
+			{
+				continue;
+			}
+
+			if (Column.NestedStructType.Equals(TableSheet.StructName, ESearchCase::CaseSensitive))
+			{
+				continue;
+			}
+
+			const FString IncludeLine = FString::Printf(TEXT("#include \"GS_%sRow.h\"\n"), *ToPascalCaseIdentifier(Column.NestedStructSheetName));
+			NestedIncludeSet.Add(IncludeLine);
+		}
+		for (const FString& IncludeLine : NestedIncludeSet)
+		{
+			NestedIncludes.Add(IncludeLine);
+		}
+		NestedIncludes.Sort();
+		for (const FString& IncludeLine : NestedIncludes)
+		{
+			Out += IncludeLine;
+		}
 		Out += FString::Printf(TEXT("#include \"GS_%sRow.generated.h\"\n\n"), *ToPascalCaseIdentifier(TableSheet.SheetName));
 
 		Out += TEXT("USTRUCT(BlueprintType)\n");
@@ -889,6 +1138,7 @@ namespace GoogleSheetImporter
 		Out += TEXT("{\n");
 		Out += TEXT("\tGENERATED_BODY()\n\n");
 
+		TSet<FString> EmittedNestedMembers;
 		for (int32 Col = 0; Col < TableSheet.Columns.Num(); ++Col)
 		{
 			if (Col == TableSheet.RowNameColumnIndex)
@@ -897,6 +1147,19 @@ namespace GoogleSheetImporter
 			}
 
 			const FParsedTableColumn &Column = TableSheet.Columns[Col];
+			if (Column.bIsNestedField)
+			{
+				if (Column.NestedMemberName.IsEmpty() || Column.NestedStructType.IsEmpty() || EmittedNestedMembers.Contains(Column.NestedMemberName))
+				{
+					continue;
+				}
+
+				EmittedNestedMembers.Add(Column.NestedMemberName);
+				Out += TEXT("\tUPROPERTY(EditAnywhere, BlueprintReadWrite)\n");
+				Out += FString::Printf(TEXT("\t%s %s;\n\n"), *Column.NestedStructType, *Column.NestedMemberName);
+				continue;
+			}
+
 			Out += TEXT("\tUPROPERTY(EditAnywhere, BlueprintReadWrite)\n");
 			Out += FString::Printf(TEXT("\t%s %s;\n\n"), *Column.Type, *Column.Name);
 		}
@@ -907,9 +1170,51 @@ namespace GoogleSheetImporter
 
 	static FString BuildCsvForDataTable(const FParsedTableSheet &TableSheet)
 	{
-		FString Out;
-		Out += TEXT(",");
-		bool bFirst = true;
+		struct FExportColumn
+		{
+			bool bNestedStruct = false;
+			FString HeaderName;
+			int32 SourceColumnIndex = INDEX_NONE;
+			TArray<int32> NestedColumnIndices;
+		};
+
+		auto EscapeStructImportString = [](const FString& InValue) -> FString
+		{
+			FString Escaped = InValue;
+			Escaped.ReplaceInline(TEXT("\\"), TEXT("\\\\"));
+			Escaped.ReplaceInline(TEXT("\""), TEXT("\\\""));
+			return Escaped;
+		};
+
+		auto IsNumericOrBoolOrEnumType = [](const FString& InType) -> bool
+		{
+			const FString Type = InType.TrimStartAndEnd();
+			return Type.Equals(TEXT("int32"), ESearchCase::CaseSensitive) ||
+				Type.Equals(TEXT("int64"), ESearchCase::CaseSensitive) ||
+				Type.Equals(TEXT("float"), ESearchCase::CaseSensitive) ||
+				Type.Equals(TEXT("double"), ESearchCase::CaseSensitive) ||
+				Type.Equals(TEXT("bool"), ESearchCase::CaseSensitive) ||
+				Type.StartsWith(TEXT("E"));
+		};
+
+		auto FormatNestedFieldValue = [&EscapeStructImportString, &IsNumericOrBoolOrEnumType](const FString& InRawValue, const FString& InType) -> FString
+		{
+			const FString Trimmed = InRawValue.TrimStartAndEnd();
+			if (Trimmed.IsEmpty())
+			{
+				return FString();
+			}
+
+			if (IsNumericOrBoolOrEnumType(InType))
+			{
+				return Trimmed;
+			}
+
+			return FString::Printf(TEXT("\"%s\""), *EscapeStructImportString(Trimmed));
+		};
+
+		TArray<FExportColumn> ExportColumns;
+		TMap<FString, int32> NestedColumnByMember;
 		for (int32 Col = 0; Col < TableSheet.Columns.Num(); ++Col)
 		{
 			if (TableSheet.bHasExplicitRowNameColumn && Col == TableSheet.RowNameColumnIndex)
@@ -917,12 +1222,45 @@ namespace GoogleSheetImporter
 				continue;
 			}
 
+			const FParsedTableColumn& Column = TableSheet.Columns[Col];
+			if (Column.bIsNestedField && !Column.NestedMemberName.IsEmpty())
+			{
+				const int32* ExistingIndex = NestedColumnByMember.Find(Column.NestedMemberName);
+				if (ExistingIndex == nullptr)
+				{
+					FExportColumn NewColumn;
+					NewColumn.bNestedStruct = true;
+					NewColumn.HeaderName = Column.NestedMemberName;
+					NewColumn.NestedColumnIndices.Add(Col);
+					const int32 NewIndex = ExportColumns.Add(MoveTemp(NewColumn));
+					NestedColumnByMember.Add(Column.NestedMemberName, NewIndex);
+				}
+				else
+				{
+					ExportColumns[*ExistingIndex].NestedColumnIndices.Add(Col);
+				}
+			}
+			else
+			{
+				FExportColumn NewColumn;
+				NewColumn.bNestedStruct = false;
+				NewColumn.HeaderName = Column.Name;
+				NewColumn.SourceColumnIndex = Col;
+				ExportColumns.Add(MoveTemp(NewColumn));
+			}
+		}
+
+		FString Out;
+		Out += TEXT(",");
+		bool bFirst = true;
+		for (const FExportColumn& ExportColumn : ExportColumns)
+		{
 			if (!bFirst)
 			{
 				Out += TEXT(",");
 			}
 			bFirst = false;
-			Out += EscapeCsvCell(TableSheet.Columns[Col].Name);
+			Out += EscapeCsvCell(ExportColumn.HeaderName);
 		}
 		Out += TEXT("\n");
 
@@ -940,20 +1278,151 @@ namespace GoogleSheetImporter
 			}
 
 			Out += EscapeCsvCell(RowNameValue);
-			for (int32 Col = 0; Col < TableSheet.Columns.Num(); ++Col)
+			for (const FExportColumn& ExportColumn : ExportColumns)
 			{
-				if (TableSheet.bHasExplicitRowNameColumn && Col == TableSheet.RowNameColumnIndex)
+				FString CellValue;
+				if (!ExportColumn.bNestedStruct)
 				{
-					continue;
+					CellValue = Row.IsValidIndex(ExportColumn.SourceColumnIndex) ? Row[ExportColumn.SourceColumnIndex] : FString();
 				}
+				else
+				{
+					FString StructLiteral = TEXT("(");
+					bool bFirstField = true;
+					for (const int32 NestedColIndex : ExportColumn.NestedColumnIndices)
+					{
+						if (!TableSheet.Columns.IsValidIndex(NestedColIndex))
+						{
+							continue;
+						}
+
+						const FParsedTableColumn& NestedColumn = TableSheet.Columns[NestedColIndex];
+						if (NestedColumn.NestedFieldName.IsEmpty())
+						{
+							continue;
+						}
+
+						const FString RawFieldValue = Row.IsValidIndex(NestedColIndex) ? Row[NestedColIndex] : FString();
+						const FString FormattedValue = FormatNestedFieldValue(RawFieldValue, NestedColumn.Type);
+						if (FormattedValue.IsEmpty())
+						{
+							continue;
+						}
+
+						if (!bFirstField)
+						{
+							StructLiteral += TEXT(",");
+						}
+						bFirstField = false;
+						StructLiteral += FString::Printf(TEXT("%s=%s"), *NestedColumn.NestedFieldName, *FormattedValue);
+					}
+					StructLiteral += TEXT(")");
+					CellValue = StructLiteral;
+				}
+
 				Out += TEXT(",");
-				const FString Cell = Row.IsValidIndex(Col) ? Row[Col] : FString();
-				Out += EscapeCsvCell(Cell);
+				Out += EscapeCsvCell(CellValue);
 			}
 			Out += TEXT("\n");
 		}
 
 		return Out;
+	}
+
+	static bool CreateOrUpdateUserDefinedEnumAsset(const FParsedEnumSheet& EnumSheet, FGoogleSheetImportResult& OutResult)
+	{
+		if (!EnumSheet.bCreateAsUserDefinedAsset)
+		{
+			return true;
+		}
+
+		FString AssetPath = EnumSheet.AssetOutputPath;
+		if (AssetPath.IsEmpty())
+		{
+			AssetPath = TEXT("/Game/Data/Generated");
+		}
+
+		if (!AssetPath.StartsWith(TEXT("/Game")))
+		{
+			OutResult.bSuccess = false;
+			OutResult.ErrorCount++;
+			OutResult.Messages.Add(FString::Printf(TEXT("[%s] Invalid asset path for UEnum: %s"), *EnumSheet.SheetName, *AssetPath));
+			return false;
+		}
+
+		const FString EnumAssetName = EnumSheet.AssetName.IsEmpty() ? (TEXT("Enum") + ToPascalCaseIdentifier(GetEnumSheetBaseName(EnumSheet.SheetName))) : EnumSheet.AssetName;
+		const FString PackageName = AssetPath / EnumAssetName;
+		UPackage* Package = FindPackage(nullptr, *PackageName);
+		if (Package == nullptr)
+		{
+			Package = LoadPackage(nullptr, *PackageName, LOAD_None);
+		}
+		if (Package == nullptr)
+		{
+			Package = CreatePackage(*PackageName);
+		}
+		if (Package == nullptr)
+		{
+			OutResult.bSuccess = false;
+			OutResult.ErrorCount++;
+			OutResult.Messages.Add(FString::Printf(TEXT("[%s] Failed creating enum package: %s"), *EnumSheet.SheetName, *PackageName));
+			return false;
+		}
+		if (!Package->IsFullyLoaded())
+		{
+			Package->FullyLoad();
+		}
+
+		UUserDefinedEnum* UserEnum = FindObject<UUserDefinedEnum>(Package, *EnumAssetName);
+		const bool bIsNewAsset = (UserEnum == nullptr);
+		if (UserEnum == nullptr)
+		{
+			UserEnum = Cast<UUserDefinedEnum>(FEnumEditorUtils::CreateUserDefinedEnum(Package, *EnumAssetName, RF_Public | RF_Standalone));
+		}
+
+		if (UserEnum == nullptr)
+		{
+			OutResult.bSuccess = false;
+			OutResult.ErrorCount++;
+			OutResult.Messages.Add(FString::Printf(TEXT("[%s] Failed creating UUserDefinedEnum: %s"), *EnumSheet.SheetName, *EnumAssetName));
+			return false;
+		}
+
+		TArray<TPair<FName, int64>> EnumNames;
+		EnumNames.Reserve(EnumSheet.Entries.Num());
+		for (const FParsedEnumEntry& Entry : EnumSheet.Entries)
+		{
+			const FString EntryName = ToSafeIdentifier(Entry.Name);
+			if (EntryName.IsEmpty())
+			{
+				continue;
+			}
+
+			const FString FullName = UserEnum->GenerateFullEnumName(*EntryName);
+			EnumNames.Emplace(*FullName, Entry.Value);
+		}
+
+		UserEnum->SetEnums(EnumNames, UEnum::ECppForm::Namespaced);
+		FEnumEditorUtils::EnsureAllDisplayNamesExist(UserEnum);
+
+		for (int32 Index = 0; Index < EnumSheet.Entries.Num(); ++Index)
+		{
+			const FString& DisplayName = EnumSheet.Entries[Index].DisplayName;
+			if (!DisplayName.IsEmpty())
+			{
+				FEnumEditorUtils::SetEnumeratorDisplayName(UserEnum, Index, FText::FromString(DisplayName));
+			}
+		}
+
+		UserEnum->MarkPackageDirty();
+		if (bIsNewAsset)
+		{
+			FAssetRegistryModule::AssetCreated(UserEnum);
+		}
+
+		OutResult.SuccessCount++;
+		OutResult.Messages.Add(FString::Printf(TEXT("[%s] UserDefinedEnum updated: %s"), *EnumSheet.SheetName, *PackageName));
+		return true;
 	}
 
 	static bool CreateOrUpdateDataTable(const FParsedTableSheet &TableSheet, FGoogleSheetImportResult &OutResult)
@@ -1285,14 +1754,22 @@ FGoogleSheetImportResult FGoogleSheetImporterService::Execute(const EGoogleSheet
 				FParsedEnumSheet EnumSheet;
 				if (ParseEnumSheet(Definition, Rows, EnumSheet, Result))
 				{
-					Workbook.Enums.Add(EnumSheet);
-					Result.Messages.Add(FString::Printf(TEXT("[%s] Enum parsed (%d entries)."), *Definition.SheetName, EnumSheet.Entries.Num()));
+					if (EnumSheet.bCreateAsUserDefinedAsset)
+					{
+						Workbook.UserDefinedEnums.Add(EnumSheet);
+						Result.Messages.Add(FString::Printf(TEXT("[%s] UserDefinedEnum parsed (%d entries)."), *Definition.SheetName, EnumSheet.Entries.Num()));
+					}
+					else
+					{
+						Workbook.NativeEnums.Add(EnumSheet);
+						Result.Messages.Add(FString::Printf(TEXT("[%s] Native enum parsed (%d entries)."), *Definition.SheetName, EnumSheet.Entries.Num()));
+					}
 				}
 			}
 			else
 			{
 				TSet<FString> KnownEnumNames;
-				for (const FParsedEnumSheet &EnumSheet : Workbook.Enums)
+				for (const FParsedEnumSheet &EnumSheet : Workbook.NativeEnums)
 				{
 					KnownEnumNames.Add(EnumSheet.EnumName);
 				}
@@ -1307,8 +1784,12 @@ FGoogleSheetImportResult FGoogleSheetImporterService::Execute(const EGoogleSheet
 		}
 	}
 
-	Workbook.Enums.Sort([](const FParsedEnumSheet &L, const FParsedEnumSheet &R)
+	ApplyBaseTableComposition(Workbook, Result);
+
+	Workbook.NativeEnums.Sort([](const FParsedEnumSheet &L, const FParsedEnumSheet &R)
 						{ return L.EnumName < R.EnumName; });
+	Workbook.UserDefinedEnums.Sort([](const FParsedEnumSheet &L, const FParsedEnumSheet &R)
+						{ return L.AssetName < R.AssetName; });
 	Workbook.Tables.Sort([](const FParsedTableSheet &L, const FParsedTableSheet &R)
 						 { return L.StructName < R.StructName; });
 
@@ -1334,7 +1815,7 @@ FGoogleSheetImportResult FGoogleSheetImporterService::Execute(const EGoogleSheet
 	{
 		const FString EnumHeaderPath = OutputDirectory / TEXT("GS_Enums.h");
 		FString Message;
-		const FString EnumHeader = BuildEnumsHeader(Workbook.Enums);
+		const FString EnumHeader = BuildEnumsHeader(Workbook.NativeEnums);
 		if (!WriteFileIfChanged(EnumHeaderPath, EnumHeader, Message))
 		{
 			Result.bSuccess = false;
@@ -1372,6 +1853,11 @@ FGoogleSheetImportResult FGoogleSheetImporterService::Execute(const EGoogleSheet
 	const bool bNeedAssets = (Action == EGoogleSheetImportAction::CreateOrUpdateAssets || Action == EGoogleSheetImportAction::FullImport);
 	if (bNeedAssets)
 	{
+		for (const FParsedEnumSheet& EnumSheet : Workbook.UserDefinedEnums)
+		{
+			CreateOrUpdateUserDefinedEnumAsset(EnumSheet, Result);
+		}
+
 		for (const FParsedTableSheet &Table : Workbook.Tables)
 		{
 			CreateOrUpdateDataTable(Table, Result);
