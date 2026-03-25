@@ -22,14 +22,18 @@ void AEnemyAIController::OnPossess(APawn* InPawn)
 {
 	Super::OnPossess(InPawn);
 
-	const AEnemyCharacter* EnemyCharacter = Cast<AEnemyCharacter>(InPawn);
+	AEnemyCharacter* EnemyCharacter = Cast<AEnemyCharacter>(InPawn);
 	if (!EnemyCharacter || !EnemyCharacter->BehaviorTreeAsset)
 	{
 		return;
 	}
 
-	if (UseBlackboard(EnemyCharacter->BehaviorTreeAsset->BlackboardAsset, BlackboardComponentRef))
+	EnemyCharacter->CaptureSpawnLocation();
+
+	UBlackboardComponent* BlackboardComponent = BlackboardComponentRef.Get();
+	if (UseBlackboard(EnemyCharacter->BehaviorTreeAsset->BlackboardAsset, BlackboardComponent))
 	{
+		BlackboardComponentRef = BlackboardComponent;
 		BlackboardComponentRef->SetValueAsVector(SpawnLocationKey, EnemyCharacter->GetSpawnLocation());
 		RunBehaviorTree(EnemyCharacter->BehaviorTreeAsset);
 	}

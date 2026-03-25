@@ -18,6 +18,8 @@ public:
 
 	virtual void BeginPlay() override;
 
+	void CaptureSpawnLocation();
+
 	UFUNCTION(BlueprintCallable, Category = "AI")
 	FVector GetSpawnLocation() const;
 

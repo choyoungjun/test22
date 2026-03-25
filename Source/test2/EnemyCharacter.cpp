@@ -19,6 +19,11 @@ void AEnemyCharacter::BeginPlay()
 {
 	Super::BeginPlay();
 
+	CaptureSpawnLocation();
+}
+
+void AEnemyCharacter::CaptureSpawnLocation()
+{
 	SpawnLocation = GetActorLocation();
 }
 
